@@ -1,318 +1,258 @@
+/*
+created by: Jacson Ritzmann
+date: 2024-12-01
+version: 1.1
+*/
 
-#include <Arduino.h>
-#include <ArduinoJson.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
-#include <NTPClient.h>
-
-#include <FirebaseClient.h>
-#include <WiFiClientSecure.h>
-
-#define WIFI_SSID "REDE_2.4"
-#define WIFI_PASSWORD "KtmSC125#"
-
-#define DATABASE_SECRET "ocSUSsb4X3bFl3vdcwQ4FHeSMa2a0ODluMJu5SQp"
-#define DATABASE_URL "horta-vertical-96557-default-rtdb.firebaseio.com"
-
-#define SENSOR_UMIDADE_PIN 34
-#define BOMBA_IRRIGACAO_PIN 2
-#define TEMPO_IRRIGACAO 180
-#define ESPERA 3600
-
-int sensorUmidadeValue = 0;
-int statusBombaValue = 0;
-int valorUmidade = 0;
-int valorBomba = 0;
-int valorCiclos = 0;
-int valorIrrigarManual = 0;
-int valorIrrigarAutomatico = 0;
-int valorRangeMax = 0;
-int valorRangeMin = 0;
-int valorReservatorio = 1;
-int valorUmidadeAtual = 0;
-int valorUmidadeInicio = 0;
-int umidadeInicialIrrigacao = 0;
-bool status = false;
-
-int ultimaIrrigacao = 0;
-bool irrigarManualAtiva = false;
-bool irrigarAutomaticaAtiva = false;
-
-int currentTime = 0;
-int horarioInicio = 6;
-int horarioFinal = 24;
-int horaAtual = 0;
-String dataAtual = "";
-String horarioAtual = "";
-
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", -3 * 3600, 60000);
-
-WiFiClientSecure ssl;
-DefaultNetwork network;
-AsyncClientClass client(ssl, getNetwork(network));
-
-FirebaseApp app;
-RealtimeDatabase Database;
-AsyncResult result;
-LegacyToken dbSecret(DATABASE_SECRET);
-
-void printError(int code, const String &msg)
-{
-    Firebase.printf("Error, msg: %s, code: %d\n", msg.c_str(), code);
-}
-
-void setupWiFi(){
-    Serial.begin(115200);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    Serial.print("Connecting to Wi-Fi");
-    while (WiFi.status() != WL_CONNECTED)
-    {
-        Serial.print(".");
-        delay(300);
+function controlFromInput(fromSlider, fromInput, toInput, controlSlider) {
+    const [from, to] = getParsed(fromInput, toInput);
+    fillSlider(fromInput, toInput, "#C6C6C6", "#25daa5", controlSlider);
+    if (from > to) {
+      fromSlider.value = to;
+      fromInput.value = to;
+    } else {
+      fromSlider.value = from;
     }
-    Serial.println();
-    Serial.print("Connected with IP: ");
-    Serial.println(WiFi.localIP());
-    Serial.println();
-}
-
-void setupNTP() {
-  timeClient.begin();
-  timeClient.update();
-}
-
-void setupFirebase() {
-    Firebase.printf("Firebase Client v%s\n", FIREBASE_CLIENT_VERSION);
-
-    ssl.setInsecure();
-    initializeApp(client, app, getAuth(dbSecret));
-    app.getApp<RealtimeDatabase>(Database);
-    Database.url(DATABASE_URL);
-    client.setAsyncResult(result);
-}
-
-String getFormattedDate(unsigned long epochTime) {
-  struct tm *ptm = gmtime((time_t *)&epochTime);
-
-  char dateString[11];  // dd/mm/YYYY
-  sprintf(dateString, "%02d/%02d/%04d", ptm->tm_mday, ptm->tm_mon + 1, ptm->tm_year + 1900);
-
-  return String(dateString);
-}
-
-void updateTime() {
-  timeClient.update();
-  currentTime = timeClient.getEpochTime();
-  horarioAtual = timeClient.getFormattedTime();
-  dataAtual = getFormattedDate(timeClient.getEpochTime());
-  horaAtual = timeClient.getHours();
-}
-
-void setup()
-{
-    setupWiFi();
-    setupFirebase();
-    setupNTP();
-    pinMode(SENSOR_UMIDADE_PIN, INPUT);
-    pinMode(BOMBA_IRRIGACAO_PIN, OUTPUT);
-    delay(1000);
-}
-
-void lerSensorUmidade() {
-  int soilMoistureValue = 500; 
-  sensorUmidadeValue = map(soilMoistureValue, 0, 1023, 100, 0);
-}
-
-void acionarBomba(bool estado) {
-  statusBombaValue = estado ? 1 : 0;
-  if (estado) {
-    digitalWrite(BOMBA_IRRIGACAO_PIN, HIGH);  // Ativa a bomba
-  } else {
-    valorCiclos = (valorCiclos + 1);
-    ultimaIrrigacao = 0;
-    digitalWrite(BOMBA_IRRIGACAO_PIN, LOW);  // Desativa a bomba
-  }
-  delay(100);
-}
-
-bool validaHorarioIrrigacao() {
-  if (horaAtual > horarioInicio && horaAtual < horarioFinal) {
-    return true;
-  }
-  return false;
-}
-
-bool validaTempoIrrigacao() {
-  if (currentTime > (ultimaIrrigacao + TEMPO_IRRIGACAO)) {
-    acionarBomba(false);
-    return true;
-  }
-  return false;
-}
-
-bool validaTempoEspera() {
-  if (currentTime > (ultimaIrrigacao + ESPERA)) {
-    return true;
-  }
-  return false;
-}
-
-void verificarReservatorio() {
-  if (irrigarAutomaticaAtiva && (currentTime - ultimaIrrigacao) > 600 && (sensorUmidadeValue <= umidadeInicialIrrigacao)) {
-    valorReservatorio = 0;
-  } else {
-    valorReservatorio = 1;
-  }
-}
-
-
-bool atualizaFirebase() {
-  DynamicJsonDocument doc(1024);
-  String jsonData;
-  doc["bomba"] = statusBombaValue;
-  doc["ciclos"] = valorCiclos;
-  doc["irrigarAutomatico"] = valorIrrigarAutomatico;
-  doc["irrigarManual"] = valorIrrigarManual;
-  JsonObject range = doc.createNestedObject("range");
-  range["max"] = valorRangeMax;
-  range["min"] = valorRangeMin;
-  doc["reservatorio"] = valorReservatorio;
-  doc["umidadeAtual"] = sensorUmidadeValue;
-  serializeJson(doc, jsonData);
-  if (Database.set<object_t>(client, "/data", object_t(jsonData))){
-    delay(100);
-    return true;
-  } else {
-    printError(client.lastError().code(), client.lastError().message());
-    delay(100);
-    ESP.restart();
-    return false;
-  }
-}
-
-void adicionarHistorico(int inicio, int final){
-  DynamicJsonDocument doc(1024);
-  doc["data"] = dataAtual;
-  doc["hora"] = horarioAtual;
-  doc["inicio"] = inicio;
-  doc["termino"] = final;
-  String json;
-  serializeJson(doc, json);
-  String name = Database.push<object_t>(client, "/historico", object_t(json));
-  if (client.lastError().code() == 0){
-      Firebase.printf("ok, name: %s\n", name.c_str());
-  } else {
-    Serial.println("Falha ao atualizar dados");
-    printError(client.lastError().code(), client.lastError().message());
-  } 
-}
-
-void consultaDadosFirebase() {
-  DynamicJsonDocument doc(1024);
-  String dados = Database.get<String>(client, "/data");
-  if (client.lastError().code() == 0){
-    DeserializationError error = deserializeJson(doc, dados);
-    if (error) {
-      Serial.print(F("Falha ao ler o JSON: "));
-      Serial.println(error.f_str());
-      return;
-    }
-    Serial.println(dados);
-    valorUmidade = doc["umidadeAtual"];
-    valorBomba = doc["bomba"];
-    valorCiclos = doc["ciclos"];
-    valorIrrigarManual = doc["irrigarManual"];
-    valorIrrigarAutomatico = doc["irrigarAutomatico"];
-    valorRangeMin = doc["range"]["min"];
-    valorRangeMax = doc["range"]["max"];
-    delay(100);
-  } else { 
-    printError(client.lastError().code(), client.lastError().message());
-    ESP.restart();
   }
   
-}
-
-void loop()
-{
-  lerSensorUmidade();
-  updateTime();
-  consultaDadosFirebase();
-
-  int statusBomba = statusBombaValue;
-  int irrigarManual = valorIrrigarManual;
-  int irrigarAutomatico = valorIrrigarAutomatico;
-  int umidadeAtual = sensorUmidadeValue;
-  int rangeMin = valorRangeMin;
-  int rangeMax = valorRangeMax;
-  int reservatorio = valorReservatorio;
- atualizaFirebase();
-  verificarReservatorio();
-  if (statusBomba == 0) {
-    if (validaHorarioIrrigacao()) {
-      if (validaTempoEspera()) {
-        if (irrigarAutomatico && !irrigarManual) {
-          if (!irrigarAutomaticaAtiva && (umidadeAtual < rangeMin)) {
-            irrigarAutomaticaAtiva = true;
-
-            valorReservatorio = 1;
-            valorUmidadeInicio = umidadeAtual;
-            ultimaIrrigacao = currentTime;
-
-            umidadeInicialIrrigacao = sensorUmidadeValue;
-            acionarBomba(true);
-            atualizaFirebase();
-          } else if (irrigarAutomaticaAtiva && (umidadeAtual < rangeMax)) {
-
-            valorReservatorio = 1;
-            ultimaIrrigacao = currentTime;
-
-            acionarBomba(true);
-            atualizaFirebase();
-          } else if (irrigarAutomaticaAtiva && (umidadeAtual >= rangeMax)) {
-
-            valorReservatorio = 1;
-            Serial.print(F("adicionarHistorico: 1"));
-            adicionarHistorico(valorUmidadeInicio, umidadeAtual);
-            irrigarAutomaticaAtiva = false;
-            acionarBomba(false);
-            atualizaFirebase();
-          }
-        }
-        if (irrigarManual) {
-          acionarBomba(true);
-          valorUmidadeInicio = umidadeAtual;
-          ultimaIrrigacao = currentTime;
-          bool status = atualizaFirebase();
-          if (status) {
-            irrigarManualAtiva = true;
-          }
-        }
-      }
+  function controlToInput(toSlider, fromInput, toInput, controlSlider) {
+    const [from, to] = getParsed(fromInput, toInput);
+    fillSlider(fromInput, toInput, "#C6C6C6", "#25daa5", controlSlider);
+    setToggleAccessible(toInput);
+    if (from <= to) {
+      toSlider.value = to;
+      toInput.value = to;
+    } else {
+      toInput.value = from;
     }
-  } else {
-    if (!irrigarManualAtiva) {
-      bool status = validaTempoIrrigacao();
-      if (status) {
-        bool status = atualizaFirebase();
-        if (status) {
-          Serial.print(F("adicionarHistorico: 3"));
-          adicionarHistorico(valorUmidadeInicio, umidadeAtual);
-        }
-      }
-    }
-    if (irrigarManualAtiva && !irrigarManual) {
-      acionarBomba(false);
-      bool status = atualizaFirebase();
-      if (status) {
-        Serial.print(F("adicionarHistorico: 2"));
-        adicionarHistorico(valorUmidadeInicio, umidadeAtual);
-        irrigarManualAtiva = false;
-      }
-    }
-
   }
-  delay(5000);
-}
+  
+  function controlFromSlider(fromSlider, toSlider, fromInput) {
+    const [from, to] = getParsed(fromSlider, toSlider);
+    fillSlider(fromSlider, toSlider, "#C6C6C6", "#25daa5", toSlider);
+    if (from > to) {
+      fromSlider.value = to;
+      fromInput.value = to;
+    } else {
+      fromInput.value = from;
+    }
+  }
+  
+  function controlToSlider(fromSlider, toSlider, toInput) {
+    const [from, to] = getParsed(fromSlider, toSlider);
+    fillSlider(fromSlider, toSlider, "#C6C6C6", "#25daa5", toSlider);
+    setToggleAccessible(toSlider);
+    if (from <= to) {
+      toSlider.value = to;
+      toInput.value = to;
+    } else {
+      toInput.value = from;
+      toSlider.value = from;
+    }
+  }
+  
+  function getParsed(currentFrom, currentTo) {
+    const from = parseInt(currentFrom.value, 10);
+    const to = parseInt(currentTo.value, 10);
+    return [from, to];
+  }
+  
+  function fillSlider(from, to, sliderColor, rangeColor, controlSlider) {
+    const rangeDistance = to.max - to.min;
+    const fromPosition = from.value - to.min;
+    const toPosition = to.value - to.min;
+    controlSlider.style.background = `linear-gradient(
+      to right,
+      ${sliderColor} 0%,
+      ${sliderColor} ${(fromPosition / rangeDistance) * 100}%,
+      ${rangeColor} ${(fromPosition / rangeDistance) * 100}%,
+      ${rangeColor} ${(toPosition / rangeDistance) * 100}%, 
+      ${sliderColor} ${(toPosition / rangeDistance) * 100}%, 
+      ${sliderColor} 100%)`;
+  }
+  
+  function setToggleAccessible(currentTarget) {
+    const toSlider = document.querySelector("#toSlider");
+    if (Number(currentTarget.value) <= 0) {
+      toSlider.style.zIndex = 2;
+    } else {
+      toSlider.style.zIndex = 0;
+    }
+  }
+  
+  var from = 10;
+  var to = 10;
+  const fromSlider = document.querySelector("#fromSlider");
+  const toSlider = document.querySelector("#toSlider");
+  const fromInput = document.querySelector("#fromInput");
+  const toInput = document.querySelector("#toInput");
+  fillSlider(fromSlider, toSlider, "#C6C6C6", "#25daa5", toSlider);
+  setToggleAccessible(toSlider);
+  
+  fromSlider.oninput = () => controlFromSlider(fromSlider, toSlider, fromInput);
+  toSlider.oninput = () => controlToSlider(fromSlider, toSlider, toInput);
+  from = controlFromInput(fromSlider, fromInput, toInput, toSlider);
+  to = controlToInput(toSlider, fromInput, toInput, toSlider);
+  
+  const firebaseConfig = {
+    apiKey: "AIzaSyDQtxvT_mEQGcojyFJCWlyFCf623vBrUkw",
+    authDomain: "horta-vertical-96557.firebaseapp.com",
+    databaseURL: "https://horta-vertical-96557-default-rtdb.firebaseio.com",
+    projectId: "horta-vertical-96557",
+    storageBucket: "horta-vertical-96557.appspot.com",
+    messagingSenderId: "400541554813",
+    appId: "1:400541554813:web:fe56a2b477e904f33c7914",
+    measurementId: "G-KCMRTRP9D6",
+  };
+  // Initialize Firebase
+  firebase.initializeApp(firebaseConfig);
+  
+  $(document).ready(function () {
+    $(".listagem-historico").html("Loading...");
+    $(".BtnIrrigarManual").addClass("fa-cloud-sun");
+    $(".BtnIrrigarManual").removeClass("fa-cloud-sun-rain");
+    var database = firebase.database();
+    var IrrigarAutomatico,
+      IrrigarManual,
+      UmidadeAtual,
+      Ciclos,
+      Historico,
+      Range,
+      Bomba,
+      qtdLista;
+  
+    qtdLista = 0;
+  
+    database.ref().on("value", function (snap) {
+      console.log(snap.val());
+      IrrigarAutomatico = snap.val().data.irrigarAutomatico;
+      IrrigarManual = snap.val().data.irrigarManual;
+      UmidadeAtual = snap.val().data.umidadeAtual;
+      Historico = snap.val().historico;
+      Bomba = snap.val().data.bomba;
+      Ciclos = snap.val().data.ciclos;
+      Range = snap.val().data.range;
+      Reservatorio = snap.val().data.reservatorio;
+
+      if(Reservatorio == 0){
+        document.getElementById("reservatorioVazio").style.display = "block";
+      }else{
+        document.getElementById("reservatorioVazio").style.display = "none";
+      }
+  
+      if (Bomba == "1") {
+        document.getElementsByClassName("fa-sun")[0].style.display = "none";
+        document.getElementsByClassName("fa-shower")[0].style.display = "block";
+      } else {
+        document.getElementsByClassName("fa-sun")[0].style.display = "block";
+        document.getElementsByClassName("fa-shower")[0].style.display = "none";
+      }
+  
+      if (IrrigarAutomatico == "1") {
+        document.getElementById("unact").style.display = "none";
+        document.getElementById("act").style.display = "block";
+      } else {
+        document.getElementById("unact").style.display = "block";
+        document.getElementById("act").style.display = "none";
+      }
+  
+      if (IrrigarManual == "1") {
+        $(".BtnIrrigarManual").addClass("fa-cloud-sun-rain");
+        $(".BtnIrrigarManual").removeClass("fa-cloud-sun");
+      } else {
+        $(".BtnIrrigarManual").addClass("fa-cloud-sun");
+        $(".BtnIrrigarManual").removeClass("fa-cloud-sun-rain");
+      }
+  
+      $(".status-umidade").text(UmidadeAtual + "%");
+      $(".appbar__controls-right-span").text(Ciclos);
+  
+      $(".listagem-historico").html("");
+      Object.keys(Historico).forEach((item) => {
+        var linha =
+          "<a class='list__item'><i class='fa-solid fa-2x fa-shower'></i><div class='list__details'>" +
+          "<h2>" +
+          Historico[item]["data"] +
+          "</h2>" +
+          "<p><i class=fa-solid fa-temperature-arrow-down'></i>Inicio " +
+          Historico[item]["inicio"] +
+          "% |" +
+          "<i class='fa-solid fa-temperature-arrow-up'></i> Termino " +
+          Historico[item]["termino"] +
+          "% | " +
+          "<i class='fa-solid fa-plug'></i> Hora " +
+          Historico[item]["hora"] +
+          " </p></div></a>";
+  
+        $(".listagem-historico").append(linha);
+        qtdLista = Historico.lenght;
+  
+        fromSlider.value = Range.min;
+        toSlider.value = Range.max;
+        fromInput.value = Range.min;
+        toInput.value = Range.max;
+        $(".min-irrigar").text(Range.min + "%");
+        $(".max-irrigar").text(Range.max + "%");
+      });
+    });
+
+    $("#btn-trash").click(function () {
+      var firebaseRef = firebase.database().ref("historico");
+      firebaseRef.remove()
+      .then(() => {
+        console.log("Node deleted successfully");
+      })
+      .catch((error) => {
+        console.error("Error deleting node: ", error);
+      });
+      firebase.database().ref("data").child("ciclos").set(0);
+    });
+  
+    $(".toggle-btn").click(function () {
+      var firebaseRef = firebase.database().ref("data").child("irrigarAutomatico");
+      if (IrrigarAutomatico == 1) {
+        firebaseRef.set(0);
+        IrrigarAutomatico = 0;
+      } else {
+        firebaseRef.set(1);
+        IrrigarAutomatico = 1;
+      }
+    });
+  
+    $(".BtnIrrigarManual").click(function () {
+      var firebaseRef1 = firebase.database().ref("data").child("irrigarManual");
+      if (IrrigarManual == 1) {
+        $(".BtnIrrigarManual").addClass("fa-cloud-sun");
+        $(".BtnIrrigarManual").removeClass("fa-cloud-sun-rain");
+        firebaseRef1.set(0);
+        IrrigarManual = 0;
+      } else {
+        $(".BtnIrrigarManual").addClass("fa-cloud-sun-rain");
+        $(".BtnIrrigarManual").removeClass("fa-cloud-sun");
+        firebaseRef1.set(1);
+        IrrigarManual = 1;
+      }
+    });
+  
+    $("#fromSlider").change(function () {
+      var range = {
+        min: Number(fromInput.value),
+        max: Number(toInput.value),
+      };
+      var firebaseRef = firebase.database().ref("data").child("range");
+      firebaseRef.set(range);
+      $(".min-irrigar").text(range.min + "%");
+      $(".max-irrigar").text(range.max + "%");
+    });
+    $("#toSlider").change(function () {
+      var range = {
+        min: Number(fromInput.value),
+        max: Number(toInput.value),
+      };
+      var firebaseRef = firebase.database().ref("data").child("range");
+      firebaseRef.set(range);
+      $(".min-irrigar").text(range.min + "%");
+      $(".max-irrigar").text(range.max + "%");
+    });
+  });
+  
